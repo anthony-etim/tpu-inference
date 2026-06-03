@@ -16,7 +16,7 @@ import copy
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Protocol, Tuple, cast
 from unittest.mock import patch
 
 import jax
@@ -36,9 +36,12 @@ from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.interfaces import (SupportsEncoderCudaGraph,
+                                                   SupportsMultiModal,
+                                                   supports_encoder_cudagraph)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, VllmModelForTextGeneration, is_pooling_model)
+from vllm.multimodal.inputs import NestedTensors
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
@@ -76,6 +79,7 @@ class _MetaModel(
         VllmModelForTextGeneration,
         VllmModelForPooling,
         SupportsMultiModal,
+        SupportsEncoderCudaGraph,
 ):
     """An abstract interface for we to have better developer experience."""
     # It's used during working on vLLM models in our VllmModelWrapper.
@@ -83,6 +87,145 @@ class _MetaModel(
     # here, but at least we can have better readability, and have better support
     # in IDE like auto-complete and go-definition ... etc.
     # If we find some interface is good for developer experience, add it here.
+
+
+class _EncoderGraphForward(Protocol):
+
+    def __call__(
+        self,
+        params_and_buffers: dict[str, jax.Array],
+        inputs: dict[str, jax.Array],
+    ) -> jax.Array:
+        """The forward function for encoder graph of multi modal data."""
+        ...
+
+
+def _to_tpu(v: torch.Tensor | None, mesh: Mesh) -> torch.Tensor | None:
+    """Move the tensor to TPU and replicate it across the mesh."""
+
+    # None does occur as some field values of mm_kwargs in some model,
+    # like Qwen 3 VL, during prepare_encoder_cudagraph_replay_buffers.
+    if v is None:
+        return None
+
+    on_tpu = v.to(device=torch.device("jax"))
+    # Wipe out possible sharding information and replicate across the mesh.
+    result = jax.device_put(jax_view(on_tpu),
+                            NamedSharding(mesh, PartitionSpec()))
+    return torch_view(result)
+
+
+class EncoderManger:
+    """
+    The helper for multi-modal data processing.
+    
+    Responsible for most initialization task from vllm EncoderCudaGraphManager.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        model: SupportsEncoderCudaGraph,
+        params_and_buffers: dict[str, jax.Array],
+        mesh: Mesh,
+    ):
+
+        self.config = model.get_encoder_cudagraph_config()
+        self.dtype = vllm_config.model_config.dtype
+
+        comp_config = vllm_config.compilation_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
+
+        def build_budgets_and_batch() -> tuple[list[int], int]:
+            user_budgets = comp_config.encoder_cudagraph_token_budgets
+            user_max_vision_items = comp_config.encoder_cudagraph_max_vision_items_per_batch
+            min_budget, max_budget = model.get_encoder_cudagraph_budget_range(
+                vllm_config)
+            assert min_budget > 0 and max_budget > 0
+            assert min_budget <= max_budget
+
+            if user_max_vision_items > 0:
+                # User provided max_vision_items only; adjust auto-inferred
+                # budgets so min(budgets) >= max_batch_size.
+                effective_min = max(min_budget, user_max_vision_items)
+                token_budgets = self._generate_budgets(effective_min,
+                                                       max_budget)
+                return token_budgets, user_max_vision_items
+            elif user_budgets:
+                # User provided budgets only; cap auto-inferred
+                # max_batch_size to min(user_budgets).
+                token_budgets = sorted(user_budgets)
+                max_batch_size = min(
+                    max_budget // min_budget,
+                    min(token_budgets),
+                )
+                return token_budgets, max_batch_size
+            else:
+                # Fully auto-inferred.
+                token_budgets = self._generate_budgets(min_budget, max_budget)
+                max_batch_size = min(
+                    max_budget // min_budget,
+                    min(token_budgets),
+                )
+                return token_budgets, max_batch_size
+
+        token_budgets, max_batch_size = build_budgets_and_batch()
+        self.token_budgets = token_budgets
+        """Sorted (ascending) list of token budgets."""
+        self.max_batch_size = max_batch_size
+
+        def build_max_frames() -> int:
+            user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
+
+            if multimodal_config.get_limit_per_prompt("video") == 0:
+                return 0
+            elif user_max_frames is not None:
+                return user_max_frames
+            else:
+                # Set it to the model-specific value from config.
+                return self.max_batch_size * self.config.max_frames_per_video
+
+        self.max_frames_per_batch = build_max_frames()
+
+        def build_inputs(token_budget: int) -> dict[str, torch.Tensor]:
+
+            with (
+                    torchax.default_env(),
+                    reparametrize(model, torch_view(params_and_buffers)),
+            ):
+
+                inputs = model.prepare_encoder_cudagraph_capture_inputs(
+                    token_budget,
+                    self.max_batch_size,
+                    self.max_frames_per_batch,
+                    device=torch.device("cpu"),
+                    dtype=self.dtype,
+                ).values
+
+                # We move tensors to TPU manually here. Since that some models
+                # like Qwen 3 VL in vLLM not really follows the contract of
+                # prepare_encoder_cudagraph_capture_inputs.
+                # Search max_seqlen in Qwen 3 VL for more details.
+                inputs = jax.tree.map(lambda x: _to_tpu(x, mesh), inputs)
+                return inputs
+
+        self.by_budget = {b: build_inputs(b) for b in self.token_budgets}
+        """The "input tensors" for each token budget."""
+
+    @staticmethod
+    def _generate_budgets(min_budget: int, max_budget: int) -> list[int]:
+        """Generate power-of-2 token budgets from min_budget to max_budget."""
+        # Copied from EncoderCudaGraphManager directly.
+        budgets: list[int] = []
+        b = min_budget
+        while b <= max_budget:
+            budgets.append(b)
+            b *= 2
+        # Always include max_budget if it's not already a power-of-2 boundary
+        if not budgets or budgets[-1] < max_budget:
+            budgets.append(max_budget)
+        return budgets
 
 
 class VllmModelWrapper:
@@ -232,6 +375,38 @@ class VllmModelWrapper:
 
         has_pooler = is_pooling_model(vllm_model)
         self._pooler: Pooler | None = self.model.pooler if has_pooler else None
+
+        self._use_graph_feature: bool = supports_encoder_cudagraph(
+            self.model
+        ) and self.vllm_config.compilation_config.cudagraph_mm_encoder
+
+        @jax.jit
+        def graph_forward_wrapper(
+            params_and_buffers: dict[str, jax.Array],
+            inputs: dict[str, jax.Array],
+        ) -> jax.Array:
+
+            # Note that we didn't activate torchax environment here,
+            # as we leaves the responsibility to the caller of this func.
+            with (reparametrize(self.model, torch_view(params_and_buffers)), ):
+                torch_inputs = torch_view(inputs)
+                torch_results = self.model.encoder_cudagraph_forward(
+                    torch_inputs)
+                results = jax_view(torch_results)
+
+            return results
+
+        if self._use_graph_feature:
+            self._encoder_manager = EncoderManger(
+                self.vllm_config,
+                self.model,
+                jax_view(params_and_buffers),
+                self.mesh,
+            )
+            self._encoder_graph_forward = cast(
+                _EncoderGraphForward,
+                graph_forward_wrapper,
+            )
 
         if self.vllm_config.model_config.is_multimodal_model:
             # NOTE: It patch mm models to be JITtable within some submodule.
@@ -402,6 +577,34 @@ class VllmModelWrapper:
         params: Any,
     ) -> Optional[Any]:
         """Return a precompile function for the vision encoder, or None."""
+
+        def precompile_encoder_graph(
+                run_compilation: Any,  # see CompilationManger._run_compilation
+        ) -> None:
+            manager = self._encoder_manager
+            assert isinstance(self.model, SupportsEncoderCudaGraph)
+            model = self.model
+
+            def job(budget: int) -> None:
+                inputs = manager.by_budget[budget]
+                with (
+                        torchax.default_env(),
+                        enable_torch_wrap(False),
+                        reparametrize(model, torch_view(params)),
+                ):
+                    _ = self._encoder_graph_forward(params, jax_view(inputs))
+
+            for budget in manager.token_budgets:
+                run_compilation(
+                    "multimodal_encoder_graph_forward",
+                    job,
+                    budget,
+                    budget=budget,
+                )
+
+        if self._use_graph_feature:
+            return precompile_encoder_graph
+
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
         embed_multimodal_fn = self.wrap_embed_multimodal_func()
@@ -411,6 +614,151 @@ class VllmModelWrapper:
     def wrap_embed_multimodal_func(self):
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
+
+        def embed_multimodal_graph_forward_all(
+            jax_params_and_buffers: dict[str, jax.Array],
+            **mm_kwargs: dict[str, NestedTensors],
+        ) -> list[jax.Array]:
+            # The return type is similar to MultiModalEmbeddings but in JAX.
+            assert isinstance(self.model, SupportsEncoderCudaGraph)
+            model = self.model
+
+            def get_fit_val(values: list[int], value: int) -> int | None:
+                # assume the values are ascending sorted.
+                for v in values:
+                    if v >= value:
+                        return v
+                return None
+
+            item_specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
+            num_items = len(item_specs)
+            out_tokens = [spec.output_tokens for spec in item_specs]
+
+            # batches is a list of (expected budget, list of item ID)"""
+            batches: list[tuple[int | None, list[int]]] = []
+            sorted_indices = sorted(
+                range(num_items),
+                key=lambda i: out_tokens[i],
+            )
+
+            # Greedy packing into batches.
+            max_budget = manager.token_budgets[-1]
+            idx = 0
+            while idx < num_items:
+                indexes: list[int] = []
+                count = 0
+                used = 0
+                has_space = count < manager.max_batch_size and used < max_budget
+                while (idx < num_items and has_space):
+                    count += 1
+                    used += out_tokens[sorted_indices[idx]]
+                    indexes.append(sorted_indices[idx])
+
+                    idx += 1
+
+                budget = get_fit_val(manager.token_budgets, used)
+                batches.append((budget, indexes))
+
+            def run_batch(
+                budget: int | None,
+                output_tokens: list[int],
+                mm_kwargs: dict[str, NestedTensors],
+            ) -> list[jax.Array]:
+                if budget is None:  # Budget size not supported
+                    return embed_multimodal_func_torch(
+                        jax_params_and_buffers,
+                        **mm_kwargs,
+                    )
+                # Now, for normal cases.
+                jax_outputs = run_graph_forward(
+                    jax_params_and_buffers,
+                    mm_kwargs,
+                    budget,
+                )
+
+                with (torchax.default_env(), ):
+                    local_indexes = list(range(len(output_tokens)))
+
+                    by_idx: dict[int, torch.Tensor] = {}
+                    model.postprocess_encoder_output(
+                        torch_view(jax_outputs),
+                        local_indexes,
+                        output_tokens,
+                        dest=by_idx,  # the output parameter
+                        clone=True,
+                        batch_mm_kwargs=mm_kwargs,
+                    )
+
+                return jax_view([by_idx[i] for i in local_indexes])
+
+            outputs: dict[int, jax.Array] = {}
+            for budget, indexes in batches:
+                batch_mm_kwargs = model.select_encoder_cudagraph_items(
+                    mm_kwargs,
+                    indexes,
+                )
+                batch_outputs = run_batch(
+                    budget,
+                    [out_tokens[i] for i in indexes],
+                    batch_mm_kwargs,
+                )
+                outputs |= {
+                    index: output
+                    for index, output in zip(indexes, batch_outputs)
+                }
+
+            return [outputs[i] for i in range(len(item_specs))]
+
+        def run_graph_forward(
+            jax_params_and_buffers: dict[str, jax.Array],
+            mm_kwargs: dict[str, NestedTensors],
+            token_budget: int,
+        ) -> jax.Array:
+            # The return tensor contains result from (possibly) multiple items.
+            model = self.model
+
+            # Duplication of EncoderCudaGraphManager._copy_padded_buffer
+            def copy_padded_buffer(
+                dst: torch.Tensor,
+                src: torch.Tensor,
+            ) -> None:
+                dst.zero_()
+                dst[:src.shape[0]].copy_(src)
+
+            with (
+                    torchax.default_env(),
+                    enable_torch_wrap(False),
+                    reparametrize(model, torch_view(jax_params_and_buffers)),
+            ):
+
+                values = model.prepare_encoder_cudagraph_replay_buffers(
+                    mm_kwargs,
+                    manager.max_batch_size,
+                    manager.max_frames_per_batch,
+                ).values
+                values = jax.tree.map(lambda x: _to_tpu(x, self.mesh), values)
+
+                inputs = manager.by_budget[token_budget]
+
+                # Move per-req states into fixed-sized tensor buffers.
+                for key in graph_config.buffer_keys:
+                    src = values.get(key)
+                    if src is None:
+                        continue
+                    buf = inputs[key]
+                    if src.ndim == 0:
+                        buf.copy_(src)
+                        continue
+                    else:
+                        pad = padding_logics.get(key, copy_padded_buffer)
+                        pad(buf, src)
+
+                jax_outputs = self._encoder_graph_forward(
+                    jax_params_and_buffers,
+                    jax_view(inputs),
+                )
+
+                return jax_outputs
 
         def embed_multimodal_func_jax(
             params_and_buffers: Any,
@@ -451,7 +799,15 @@ class VllmModelWrapper:
                     embed_multimodal_func_jax, self.model)(params_and_buffers,
                                                            **call_kwargs)
 
-        return embed_multimodal_func_torch
+        if self._use_graph_feature:
+            manager = self._encoder_manager
+            graph_config = manager.config
+            padding_logics = graph_config.padding_logics
+
+        if self._use_graph_feature:
+            return embed_multimodal_graph_forward_all
+        else:
+            return embed_multimodal_func_torch
 
     def wrap_embed_input_ids_func(self):
         if not self.vllm_config.model_config.is_multimodal_model:
