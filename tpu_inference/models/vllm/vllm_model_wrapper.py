@@ -648,8 +648,11 @@ class VllmModelWrapper:
                 indexes: list[int] = []
                 count = 0
                 used = 0
-                has_space = count < manager.max_batch_size and used < max_budget
-                while (idx < num_items and has_space):
+                has_space = [
+                    count < manager.max_batch_size,
+                    used + out_tokens[sorted_indices[idx]] < max_budget
+                ]
+                while (idx < num_items and all(has_space)):
                     count += 1
                     used += out_tokens[sorted_indices[idx]]
                     indexes.append(sorted_indices[idx])
