@@ -35,7 +35,7 @@ steps:
           exit 1
         fi
           
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for meta-llama/Llama-Guard-4-12B/multimodal"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for meta-llama/Llama-Guard-4-12B/multimodal"
     key: "${BK_KEY}_record_meta-llama_Llama-Guard-4-12B_multimodal_UnitTest"
     depends_on: "${BK_KEY}_meta-llama_Llama-Guard-4-12B_multimodal_UnitTest"
     env:
