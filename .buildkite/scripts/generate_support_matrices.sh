@@ -64,6 +64,12 @@ get_quantization_method() {
         *) echo "N/A" ;;
     esac
 }
+
+# Helper function to sanitize strings for metadata keys
+sanitize_name() {
+   echo "$1" | sed -E 's|[/:\.[[:space:]]]+|_|g; s/^_|_$//g'
+}
+
 declare -a model_csv_files=()
 declare -a feature_csv_files=()
 declare -a default_feature_names=()
@@ -91,7 +97,7 @@ if [[ -f "${DEFAULT_FEATURES_FILE}" ]]; then
             default_feature_names+=("$feature_name")
             
             # Sanitize the feature name for safe use in CI metadata keys
-            safe_feature=$(echo "$feature_name" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+            safe_feature=$(sanitize_name "$feature_name")
             
             # Register the category against all active hardware targets
             for ci_tpu_version in "${ACTIVE_TPU_CONFIGS[@]}"; do
@@ -128,7 +134,7 @@ process_models() {
 
                 # Sanitize the model name for Buildkite metadata keys (e.g., replaces / : . with _)
                 local safe_model
-                safe_model=$(echo "$model" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+                safe_model=$(sanitize_name "$model")
 
                 # Get the category (default: text-only)
                 local category_key="${ci_tpu_version}_${safe_model}_category"
@@ -154,9 +160,9 @@ process_models() {
                         result="${framework}"
                     else
                         local safe_model_name
-                        safe_model_name=$(echo "$model" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+                        safe_model_name=$(sanitize_name "$model")
                         local safe_stage_name
-                        safe_stage_name=$(echo "$stage" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+                        safe_stage_name=$(sanitize_name "$stage")
                         local meta_key="${ci_tpu_version}_${framework}_${safe_model_name}_${safe_stage_name}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                     fi
@@ -191,7 +197,7 @@ process_features() {
 
                 # Sanitize the feature name for Buildkite metadata lookups
                 local safe_feature
-                safe_feature=$(echo "$feature" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+                safe_feature=$(sanitize_name "$feature")
                 
                 # Get Category (default: feature support matrix)
                 local category_key="${ci_tpu_version}_${safe_feature}_category"
@@ -244,9 +250,9 @@ process_features() {
                         result="✅ Passing"
                     else
                         local safe_feature
-                        safe_feature=$(echo "$feature" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+                        safe_feature=$(sanitize_name "$feature")
                         local safe_stage
-                        safe_stage=$(echo "$stage" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+                        safe_stage=$(sanitize_name "$stage")
                         local meta_key="${ci_tpu_version}_${framework}_${safe_feature}_${safe_stage}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
 
