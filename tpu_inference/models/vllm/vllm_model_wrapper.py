@@ -186,15 +186,21 @@ class EncoderManger:
 
         def build_inputs(token_budget: int) -> dict[str, torch.Tensor]:
 
-            inputs = model.prepare_encoder_cudagraph_capture_inputs(
-                token_budget,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                device=torch.device("cpu"),
-                dtype=self.dtype,
-            ).values
-
-            return inputs
+            # Dirty hack, somehow fail for 1st time for bucket size 512
+            # RuntimeError: pool INTERNAL ASSERT FAILED at "/pytorch/aten/src/ATen/ParallelOpenMP.cpp":64, please report a bug to PyTorch. Invalid thread pool!
+            for _ in range(4):
+                try:
+                    inputs = model.prepare_encoder_cudagraph_capture_inputs(
+                        token_budget,
+                        self.max_batch_size,
+                        self.max_frames_per_batch,
+                        device=torch.device("cpu"),
+                        dtype=self.dtype,
+                    ).values
+                except RuntimeError as err:
+                    logger.warning(f"EncoderManger fail {token_budget}: {err}")
+                    continue
+                return inputs
 
         self.by_budget = {b: build_inputs(b) for b in self.token_budgets}
         """The "input tensors" for each token budget."""
