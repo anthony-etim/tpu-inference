@@ -100,7 +100,7 @@ class _EncoderGraphForward(Protocol):
         ...
 
 
-def _to_tpu(v: torch.Tensor | None, mesh: Mesh) -> torch.Tensor | None:
+def _to_tpu(v: torch.Tensor) -> torch.Tensor | None:
     """Move the tensor to TPU and replicate it across the mesh."""
 
     # None does occur as some field values of mm_kwargs in some model,
@@ -108,11 +108,7 @@ def _to_tpu(v: torch.Tensor | None, mesh: Mesh) -> torch.Tensor | None:
     if v is None:
         return None
 
-    on_tpu = v.to(device=torch.device("jax"))
-    # Wipe out possible sharding information and replicate across the mesh.
-    result = jax.device_put(jax_view(on_tpu),
-                            NamedSharding(mesh, PartitionSpec()))
-    return torch_view(result)
+    return torch_view(t2j(v, use_dlpack=False))
 
 
 class EncoderManger:
@@ -190,25 +186,15 @@ class EncoderManger:
 
         def build_inputs(token_budget: int) -> dict[str, torch.Tensor]:
 
-            with (
-                    torchax.default_env(),
-                    reparametrize(model, torch_view(params_and_buffers)),
-            ):
+            inputs = model.prepare_encoder_cudagraph_capture_inputs(
+                token_budget,
+                self.max_batch_size,
+                self.max_frames_per_batch,
+                device=torch.device("cpu"),
+                dtype=self.dtype,
+            ).values
 
-                inputs = model.prepare_encoder_cudagraph_capture_inputs(
-                    token_budget,
-                    self.max_batch_size,
-                    self.max_frames_per_batch,
-                    device=torch.device("cpu"),
-                    dtype=self.dtype,
-                ).values
-
-                # We move tensors to TPU manually here. Since that some models
-                # like Qwen 3 VL in vLLM not really follows the contract of
-                # prepare_encoder_cudagraph_capture_inputs.
-                # Search max_seqlen in Qwen 3 VL for more details.
-                inputs = jax.tree.map(lambda x: _to_tpu(x, mesh), inputs)
-                return inputs
+            return inputs
 
         self.by_budget = {b: build_inputs(b) for b in self.token_budgets}
         """The "input tensors" for each token budget."""
@@ -592,6 +578,7 @@ class VllmModelWrapper:
                         enable_torch_wrap(False),
                         reparametrize(model, torch_view(params)),
                 ):
+                    inputs = jax.tree.map(_to_tpu, inputs)
                     _ = self._encoder_graph_forward(params, jax_view(inputs))
 
             for budget in manager.token_budgets:
@@ -728,33 +715,33 @@ class VllmModelWrapper:
                 dst.zero_()
                 dst[:src.shape[0]].copy_(src)
 
+            values = model.prepare_encoder_cudagraph_replay_buffers(
+                mm_kwargs,
+                manager.max_batch_size,
+                manager.max_frames_per_batch,
+            ).values
+
+            inputs = manager.by_budget[token_budget]
+            # Move per-req states into fixed-sized tensor buffers.
+            for key in graph_config.buffer_keys:
+                src = values.get(key)
+                if src is None:
+                    continue
+                buf = inputs[key]
+                if src.ndim == 0:
+                    buf.copy_(src)
+                    continue
+                else:
+                    pad = padding_logics.get(key, copy_padded_buffer)
+                    pad(buf, src)
+
             with (
                     torchax.default_env(),
                     enable_torch_wrap(False),
                     reparametrize(model, torch_view(jax_params_and_buffers)),
             ):
 
-                values = model.prepare_encoder_cudagraph_replay_buffers(
-                    mm_kwargs,
-                    manager.max_batch_size,
-                    manager.max_frames_per_batch,
-                ).values
-                values = jax.tree.map(lambda x: _to_tpu(x, self.mesh), values)
-
-                inputs = manager.by_budget[token_budget]
-
-                # Move per-req states into fixed-sized tensor buffers.
-                for key in graph_config.buffer_keys:
-                    src = values.get(key)
-                    if src is None:
-                        continue
-                    buf = inputs[key]
-                    if src.ndim == 0:
-                        buf.copy_(src)
-                        continue
-                    else:
-                        pad = padding_logics.get(key, copy_padded_buffer)
-                        pad(buf, src)
+                inputs = jax.tree.map(_to_tpu, inputs)
 
                 jax_outputs = self._encoder_graph_forward(
                     jax_params_and_buffers,
