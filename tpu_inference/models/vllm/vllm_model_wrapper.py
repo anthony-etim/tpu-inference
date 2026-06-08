@@ -112,7 +112,7 @@ def _to_tpu(v: torch.Tensor) -> torch.Tensor | None:
     return torch_view(t2j(v, use_dlpack=False))
 
 
-class EncoderManger:
+class EncoderManager:
     """
     The helper for multi-modal data processing.
     
@@ -387,7 +387,7 @@ class VllmModelWrapper:
             return results
 
         if self._use_graph_feature:
-            self._encoder_manager = EncoderManger(
+            self._encoder_manager = EncoderManager(
                 self.vllm_config,
                 self.model,
             )
