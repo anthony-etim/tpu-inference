@@ -42,6 +42,7 @@ from vllm.model_executor.models.interfaces import (SupportsEncoderCudaGraph,
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, VllmModelForTextGeneration, is_pooling_model)
 from vllm.multimodal.inputs import NestedTensors
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
@@ -186,13 +187,17 @@ class EncoderManger:
 
         def build_inputs(token_budget: int) -> dict[str, torch.Tensor]:
 
-            inputs = model.prepare_encoder_cudagraph_capture_inputs(
-                token_budget,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                device=torch.device("cpu"),
-                dtype=self.dtype,
-            ).values
+            # Temporary overriding this value here can help mitigate an
+            # assertion error in OpenMP (libgomp) shipped with PyTorch (2.10).
+            # that breaks for budget 512 for model Qwen/Qwen3-VL-2B-Thinking.
+            with set_default_torch_num_threads(None):
+                inputs = model.prepare_encoder_cudagraph_capture_inputs(
+                    token_budget,
+                    self.max_batch_size,
+                    self.max_frames_per_batch,
+                    device=torch.device("cpu"),
+                    dtype=self.dtype,
+                ).values
 
             return inputs
 
