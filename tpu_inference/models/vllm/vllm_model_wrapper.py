@@ -367,9 +367,10 @@ class VllmModelWrapper:
         has_pooler = is_pooling_model(vllm_model)
         self._pooler: Pooler | None = self.model.pooler if has_pooler else None
 
-        self._use_graph_feature: bool = supports_encoder_cudagraph(
-            self.model
-        ) and self.vllm_config.compilation_config.cudagraph_mm_encoder
+        self._use_graph_feature: bool = all([
+            supports_encoder_cudagraph(self.model),
+            self.vllm_config.compilation_config.cudagraph_mm_encoder,
+        ])
 
         @jax.jit
         def graph_forward_wrapper(
