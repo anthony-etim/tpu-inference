@@ -123,8 +123,6 @@ class EncoderManger:
         self,
         vllm_config: VllmConfig,
         model: SupportsEncoderCudaGraph,
-        params_and_buffers: dict[str, jax.Array],
-        mesh: Mesh,
     ):
 
         self.config = model.get_encoder_cudagraph_config()
@@ -392,8 +390,6 @@ class VllmModelWrapper:
             self._encoder_manager = EncoderManger(
                 self.vllm_config,
                 self.model,
-                jax_view(params_and_buffers),
-                self.mesh,
             )
             self._encoder_graph_forward = cast(
                 _EncoderGraphForward,
