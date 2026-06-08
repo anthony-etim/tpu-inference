@@ -666,26 +666,16 @@ class VllmModelWrapper:
                         **mm_kwargs,
                     )
                 # Now, for normal cases.
-                jax_outputs = run_graph_forward(
+                local_indexes = list(range(len(output_tokens)))
+                outputs = run_graph_forward(
                     jax_params_and_buffers,
                     mm_kwargs,
                     budget,
+                    local_indexes,
+                    output_tokens,
                 )
 
-                with (torchax.default_env(), ):
-                    local_indexes = list(range(len(output_tokens)))
-
-                    by_idx: dict[int, torch.Tensor] = {}
-                    model.postprocess_encoder_output(
-                        torch_view(jax_outputs),
-                        local_indexes,
-                        output_tokens,
-                        dest=by_idx,  # the output parameter
-                        clone=True,
-                        batch_mm_kwargs=mm_kwargs,
-                    )
-
-                return jax_view([by_idx[i] for i in local_indexes])
+                return jax_view(outputs)
 
             outputs: dict[int, jax.Array] = {}
             for budget, indexes in batches:
@@ -709,7 +699,9 @@ class VllmModelWrapper:
             jax_params_and_buffers: dict[str, jax.Array],
             mm_kwargs: dict[str, NestedTensors],
             token_budget: int,
-        ) -> jax.Array:
+            indexes: list[int],
+            output_tokens: list[int],
+        ) -> list[torch.Tensor]:
             # The return tensor contains result from (possibly) multiple items.
             model = self.model
 
@@ -753,8 +745,19 @@ class VllmModelWrapper:
                     jax_params_and_buffers,
                     jax_view(inputs),
                 )
+                outputs = torch_view(jax_outputs)
 
-                return jax_outputs
+                by_idx: dict[int, torch.Tensor] = {}
+                model.postprocess_encoder_output(
+                    outputs,
+                    indexes,
+                    output_tokens,
+                    dest=by_idx,  # the output parameter
+                    clone=True,
+                    batch_mm_kwargs=mm_kwargs,
+                )
+
+            return [by_idx[i] for i in indexes]
 
         def embed_multimodal_func_jax(
             params_and_buffers: Any,
