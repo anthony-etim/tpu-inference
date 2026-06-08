@@ -87,6 +87,18 @@ class Gemma4MTPMaskedEmbedder(JaxModule):
     ) -> Tuple[jax.Array, jax.Array]:
         """Centroid selection + sparse dot product."""
         num_tokens = hidden_states.shape[0]
+
+        # Handle transposed lm_head_weight if necessary.
+        # lm_head.weight is (hidden_size, vocab_size) due to weight loader permutation.
+        # embed_tokens.weight is (vocab_size, hidden_size).
+        if lm_head_weight.shape == (self.hidden_size, self.vocab_size):
+            lm_head_weight = lm_head_weight.T
+        elif lm_head_weight.shape != (self.vocab_size, self.hidden_size):
+            raise ValueError(
+                f"Unexpected lm_head_weight shape: {lm_head_weight.shape}, "
+                f"expected ({self.hidden_size}, {self.vocab_size}) or ({self.vocab_size}, {self.hidden_size})"
+            )
+
         centroid_logits = self.centroids(
             hidden_states)  # (num_tokens, num_centroids)
         _, top_k_indices = jax.lax.top_k(
@@ -234,6 +246,10 @@ class Gemma4MTPAttention(JaxModule):
         )
 
         self.is_kv_shared_layer = True
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
     def __call__(
         self,
@@ -255,10 +271,11 @@ class Gemma4MTPAttention(JaxModule):
         )
 
         num_tokens = q.shape[0]
+        dummy_dtype = self.kv_cache_quantized_dtype or q.dtype
         dummy_k = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
-                            dtype=q.dtype)
+                            dtype=dummy_dtype)
         dummy_v = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
-                            dtype=q.dtype)
+                            dtype=dummy_dtype)
 
         new_kv_cache, outputs = attention(
             kv_cache,
