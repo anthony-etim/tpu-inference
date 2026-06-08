@@ -67,7 +67,7 @@ get_quantization_method() {
 
 # Helper function to sanitize strings for metadata keys
 sanitize_name() {
-   echo "$1" | sed -E 's|[/:\.[[:space:]]]+|_|g; s/^_|_$//g'
+    echo "$1" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g'
 }
 
 declare -a model_csv_files=()
