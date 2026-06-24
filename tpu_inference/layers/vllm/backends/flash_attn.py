@@ -229,6 +229,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         "k_scale",
         "v_scale",
         "sliding_window",
+        "soft_cap",
     ),
     donate_argnames=("kv_cache"),
 )
@@ -248,6 +249,7 @@ def _jax_attn_func(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sliding_window: int | None = None,
+    soft_cap: float | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # Get shapes from vllm
     q_len = q.shape[0]
@@ -271,6 +273,7 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        soft_cap=soft_cap,
     )
 
     # Convert the shape back to vLLM's convention
