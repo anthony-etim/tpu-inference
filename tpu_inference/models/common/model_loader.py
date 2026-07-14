@@ -269,7 +269,16 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
         with jax.set_mesh(mesh):
-            model = nnx.eval_shape(abstract_model_fn)
+            if getattr(model_class, '_self_manages_sharding', False):
+                # These models build their structure eagerly in __init__ and
+                # fill real weights in load_weights (see KerasNNXModel). Tracing
+                # construction under nnx.eval_shape would bake any eager tensor
+                # op in the backbone (e.g. Gemma's `x * sqrt(hidden_dim)`
+                # embedding scale) into a tracer that later escapes into the
+                # forward. Construct eagerly so such constants stay concrete.
+                model = abstract_model_fn()
+            else:
+                model = nnx.eval_shape(abstract_model_fn)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
