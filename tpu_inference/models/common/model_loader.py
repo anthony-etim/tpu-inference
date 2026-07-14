@@ -100,11 +100,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
 
     architectures = getattr(config, "architectures", [])
-    # jax-native: any config carrying `keras_hub_preset` is served as a
-    # native flax/nnx KerasHub model. It uses a standard arch name (e.g.
-    # GPT2LMHeadModel) only to pass vLLM's arch validation (vLLM's
-    # ModelRegistry only accepts torch classes); the real model is selected
-    # here by the preset. It sets _self_manages_sharding=True.
+    # jax-native: any config carrying `keras_hub_preset` is served as a native
+    # flax/nnx KerasHub model. Its config uses the neutral `KerasHubForCausalLM`
+    # arch / `keras_hub` model_type (registered by `register_layers` so vLLM's
+    # up-front validation passes); the real model is selected here by the
+    # preset. KerasNNXModel sets _self_manages_sharding=True.
     if getattr(config, "keras_hub_preset", None):
         from keras_hub.src.vllm.nnx_adapter import KerasNNXModel
         return KerasNNXModel
