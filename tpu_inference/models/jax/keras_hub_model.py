@@ -177,28 +177,59 @@ class KerasHubForCausalLM(nnx.Module):
     def _set_serving_context(self, kv_caches, attention_metadata, positions):
         """Publishes the paged-attention context for the attention routes.
 
-        The native path does not inject a paged-attention function, so the
-        ragged-paged-attention kernel (`_jax_attn_func`) is supplied here
-        unless the attention metadata already carries one. The per-layer
-        paged KV caches ride in the context too: KerasHub's shared bridge
-        consumes them in layer-call order, so the layers run their plain
-        `cache=None` path and need no cache threading.
+        The published function wraps this repo's ragged-paged-attention
+        kernel (`_jax_attn_func`) behind a small stable contract carrying
+        only what a KerasHub attention layer knows::
+
+            fn(kv_cache, q, k, v, scale, head_size, num_heads, num_kv_heads,
+               sliding_window=None, soft_cap=None) -> (new_kv_cache, output)
+
+        Engine-side arguments (the attention metadata, the mesh) are closed
+        over here, so kernel signature changes stay local to this repo. The
+        per-layer paged KV caches ride in the context too: KerasHub's shared
+        bridge consumes them in layer-call order, so the layers run their
+        plain `cache=None` path and need no cache threading.
         """
+        mesh = self.mesh
+
+        def paged_attention(kv_cache,
+                            q,
+                            k,
+                            v,
+                            scale,
+                            head_size,
+                            num_heads,
+                            num_kv_heads,
+                            sliding_window=None,
+                            soft_cap=None):
+            return _jax_attn_func(
+                kv_cache=kv_cache,
+                q=q,
+                k=k,
+                v=v,
+                sinks=None,  # KerasHub attention layers have no sinks.
+                attention_metadata=attention_metadata,
+                shared_attention_metadata=None,  # single-chip serving
+                mesh=mesh,
+                scale=scale,
+                head_size=head_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                sliding_window=sliding_window,
+                soft_cap=soft_cap,
+            )
+
         block_tables = getattr(attention_metadata, "block_tables", None)
         slot_mapping = getattr(
             attention_metadata,
             "slot_mapping_tensor",
             getattr(attention_metadata, "slot_mapping", None),
         )
-        paged_attn_func = getattr(attention_metadata, "paged_attention_func",
-                                  None)
-        if paged_attn_func is None:
-            paged_attn_func = _jax_attn_func
         set_vllm_context(
             block_tables,
             slot_mapping,
             attention_metadata,
-            paged_attn_func,
+            paged_attention,
             self.mesh,
             positions=positions,
             kv_caches=kv_caches,

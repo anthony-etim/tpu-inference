@@ -29,15 +29,23 @@ def register_layers():
 
 
 def _register_keras_hub():
-    """Register KerasHub's config and model class with transformers/vLLM.
+    """Registers everything needed to serve KerasHub presets, at plugin load.
 
-    KerasHub presets are served by the native flax/nnx ``KerasHubForCausalLM``
-    model class. Registration follows the standard mechanisms end to end:
-    ``register_hf_config`` teaches transformers the ``keras_hub`` model_type,
-    and ``register_model`` puts ``KerasHubForCausalLM`` in the model registry
-    (and vLLM's), so the loader resolves it by architecture name exactly like
-    any other model. The preset to serve rides in the config's
-    ``keras_hub_preset`` field, which the model class reads.
+    Four registrations, all through the standard mechanisms:
+
+    - ``register_hf_config()`` teaches transformers the ``keras_hub``
+      model_type, so ``AutoConfig`` can read the config KerasHub writes.
+    - ``register_model`` puts the ``KerasHubForCausalLM`` model class in the
+      model registry (and vLLM's), so the loader resolves it by architecture
+      name exactly like any other model.
+    - ``TokenizerRegistry`` maps ``tokenizer_mode="keras_hub"`` to
+      ``KerasHubTokenizer``, so vLLM tokenizes with the preset's own
+      KerasHub tokenizer.
+    - ``RENDERER_REGISTRY`` maps the same mode to vLLM's standard HF prompt
+      renderer, which drives any registered tokenizer.
+
+    The preset to serve rides in the config's ``keras_hub_preset`` field,
+    which the model class and tokenizer read.
     """
     # keras_hub is an optional dependency, and model_loader must not be
     # imported at module scope (see the inline-import NOTE in
@@ -53,7 +61,9 @@ def _register_keras_hub():
     register_model(KERAS_HUB_ARCHITECTURE, KerasHubForCausalLM)
     # Tokenizer side: serve the preset's own KerasHub tokenizer
     # (tokenizer_mode="keras_hub"); registered by module path, resolved
-    # lazily by whichever process loads the tokenizer.
+    # lazily by whichever process loads the tokenizer. vLLM keys its prompt
+    # renderer by the same mode; the standard HF renderer drives any
+    # TokenizerLike, so map "keras_hub" to it.
     TokenizerRegistry.register("keras_hub", "keras_hub.src.vllm.tokenizer",
                                "KerasHubTokenizer")
     RENDERER_REGISTRY.register("keras_hub", "vllm.renderers.hf", "HfRenderer")
