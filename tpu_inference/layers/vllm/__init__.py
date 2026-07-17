@@ -26,23 +26,22 @@ def register_layers():
 
 
 def _register_keras_hub():
-    """Register KerasHub's neutral config and architecture with transformers/vLLM.
+    """Register KerasHub's config and model class with transformers/vLLM.
 
-    KerasHub presets are served as native flax/nnx ``KerasNNXModel`` (selected by
-    ``keras_hub_preset``), but vLLM still validates the config's ``model_type``
-    (via transformers) and ``architectures`` (via its own registry) before the
-    model loads. We register a neutral ``keras_hub`` / ``KerasHubForCausalLM``
-    for both, so no real model family's name has to be borrowed.
+    KerasHub presets are served by the native flax/nnx ``KerasHubForCausalLM``
+    model class. Registration follows the standard mechanisms end to end:
+    ``register_hf_config`` teaches transformers the ``keras_hub`` model_type,
+    and ``register_model`` puts ``KerasHubForCausalLM`` in the model registry
+    (and vLLM's), so the loader resolves it by architecture name exactly like
+    any other model. The preset to serve rides in the config's
+    ``keras_hub_preset`` field, which the model class reads.
     """
     from keras_hub.src.vllm.hf_config import (KERAS_HUB_ARCHITECTURE,
                                               register_hf_config)
-    from keras_hub.src.vllm.nnx_adapter import KerasNNXModel
 
     from tpu_inference.models.common.model_loader import register_model
+    from tpu_inference.models.jax.keras_hub_model import KerasHubForCausalLM
 
     # transformers side: resolve `model_type: keras_hub` in every worker.
     register_hf_config()
-    # vLLM side: KerasNNXModel satisfies the loader's model interface, so
-    # the helper wraps it to pass vLLM's arch validation. The real model is
-    # still chosen by `keras_hub_preset` in `_get_model_architecture`.
-    register_model(KERAS_HUB_ARCHITECTURE, KerasNNXModel)
+    register_model(KERAS_HUB_ARCHITECTURE, KerasHubForCausalLM)

@@ -100,14 +100,6 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
 
     architectures = getattr(config, "architectures", [])
-    # jax-native: any config carrying `keras_hub_preset` is served as a native
-    # flax/nnx KerasHub model. Its config uses the neutral `KerasHubForCausalLM`
-    # arch / `keras_hub` model_type (registered by `register_layers` so vLLM's
-    # up-front validation passes); the real model is selected here by the
-    # preset. KerasNNXModel sets _self_manages_sharding=True.
-    if getattr(config, "keras_hub_preset", None):
-        from keras_hub.src.vllm.nnx_adapter import KerasNNXModel
-        return KerasNNXModel
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
@@ -269,16 +261,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
         with jax.set_mesh(mesh):
-            if getattr(model_class, '_self_manages_sharding', False):
-                # These models build their structure eagerly in __init__ and
-                # fill real weights in load_weights (see KerasNNXModel). Tracing
-                # construction under nnx.eval_shape would bake any eager tensor
-                # op in the backbone (e.g. Gemma's `x * sqrt(hidden_dim)`
-                # embedding scale) into a tracer that later escapes into the
-                # forward. Construct eagerly so such constants stay concrete.
-                model = abstract_model_fn()
-            else:
-                model = nnx.eval_shape(abstract_model_fn)
+            model = nnx.eval_shape(abstract_model_fn)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
