@@ -229,6 +229,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         "k_scale",
         "v_scale",
         "sliding_window",
+        "soft_cap",
     ),
     donate_argnames=("kv_cache"),
 )
