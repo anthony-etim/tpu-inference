@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.registry import TokenizerRegistry
 
 from tpu_inference.layers.vllm import backends as backends
@@ -55,3 +56,4 @@ def _register_keras_hub():
     # lazily by whichever process loads the tokenizer.
     TokenizerRegistry.register("keras_hub", "keras_hub.src.vllm.tokenizer",
                                "KerasHubTokenizer")
+    RENDERER_REGISTRY.register("keras_hub", "vllm.renderers.hf", "HfRenderer")
