@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from vllm.tokenizers.registry import TokenizerRegistry
+
 from tpu_inference.layers.vllm import backends as backends
 from tpu_inference.layers.vllm import custom_ops as custom_ops
 from tpu_inference.layers.vllm import ops as ops
@@ -36,6 +38,9 @@ def _register_keras_hub():
     any other model. The preset to serve rides in the config's
     ``keras_hub_preset`` field, which the model class reads.
     """
+    # keras_hub is an optional dependency, and model_loader must not be
+    # imported at module scope (see the inline-import NOTE in
+    # `_get_model_architecture`) — so these resolve at registration time.
     from keras_hub.src.vllm.hf_config import (KERAS_HUB_ARCHITECTURE,
                                               register_hf_config)
 
@@ -45,3 +50,8 @@ def _register_keras_hub():
     # transformers side: resolve `model_type: keras_hub` in every worker.
     register_hf_config()
     register_model(KERAS_HUB_ARCHITECTURE, KerasHubForCausalLM)
+    # Tokenizer side: serve the preset's own KerasHub tokenizer
+    # (tokenizer_mode="keras_hub"); registered by module path, resolved
+    # lazily by whichever process loads the tokenizer.
+    TokenizerRegistry.register("keras_hub", "keras_hub.src.vllm.tokenizer",
+                               "KerasHubTokenizer")
