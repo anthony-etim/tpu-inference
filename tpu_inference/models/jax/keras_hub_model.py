@@ -17,8 +17,8 @@ from flax import nnx
 from jax.sharding import Mesh
 from keras import ops
 from keras_hub.src.models.causal_lm import CausalLM
-from keras_hub.src.vllm.context import (clear_vllm_context, get_vllm_context,
-                                        set_vllm_context)
+from keras_hub.src.vllm.context import (get_vllm_context,
+                                        vllm_context_scope)
 from vllm.config import VllmConfig
 
 from tpu_inference.layers.vllm.backends.flash_attn import _jax_attn_func
@@ -107,7 +107,7 @@ class KerasHubForCausalLM(nnx.Module):
         model-specific detail (embedding scaling, learned vs. rotary
         positions, per-family norms) in the model. Each attention layer's
         vLLM route and KerasHub's `PositionEmbedding` read the context in
-        place, and the context is cleared when the step finishes.
+        place; the scope clears it when the step finishes, even on error.
 
         Returns:
             `(updated_kv_caches, hidden_states, None, None)` — the tuple
@@ -123,8 +123,8 @@ class KerasHubForCausalLM(nnx.Module):
         # vLLM presents already-packed tokens; there is no padding to mask.
         padding_mask = ops.ones_like(token_ids)
 
-        self._set_serving_context(kv_caches, attention_metadata, positions)
-        try:
+        with self._serving_context(kv_caches, attention_metadata,
+                                   positions):
             hidden_states = self.backbone(
                 {
                     "token_ids": token_ids,
@@ -155,8 +155,6 @@ class KerasHubForCausalLM(nnx.Module):
                     "attention layer skipped the vLLM dispatch (or "
                     "dispatched more than once); serving this model would "
                     "produce incorrect output.")
-        finally:
-            clear_vllm_context()
 
         return updated_kv_caches, hidden_states, None, None
 
@@ -174,8 +172,12 @@ class KerasHubForCausalLM(nnx.Module):
         """
         return self.backbone.token_embedding(hidden_states, reverse=True)
 
-    def _set_serving_context(self, kv_caches, attention_metadata, positions):
-        """Publishes the paged-attention context for the attention routes.
+    def _serving_context(self, kv_caches, attention_metadata, positions):
+        """Builds the serving-context scope for one forward step.
+
+        Returns keras-hub's ``vllm_context_scope`` context manager, which
+        publishes the thread-local serving context on entry and always
+        clears it on exit, even when the forward raises.
 
         The published function wraps this repo's ragged-paged-attention
         kernel (`_jax_attn_func`) behind a small stable contract carrying
@@ -225,7 +227,7 @@ class KerasHubForCausalLM(nnx.Module):
             "slot_mapping_tensor",
             getattr(attention_metadata, "slot_mapping", None),
         )
-        set_vllm_context(
+        return vllm_context_scope(
             block_tables,
             slot_mapping,
             attention_metadata,
