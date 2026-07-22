@@ -83,13 +83,17 @@ class KerasHubForCausalLM(nnx.Module):
 
         One `CausalLM.from_preset` call, the same as any other KerasHub
         usage: it builds the model and loads the preset weights in place.
+        Only the backbone is kept: serving never calls the task wrapper,
+        and a compiled task carries a layer-keyed dict (Keras 3.15's
+        `_compiled_trainable_state`) whose keys nnx's graph flatten cannot
+        sort.
 
         Args:
             *args: Variable length argument list (unused).
             **kwargs: Arbitrary keyword arguments (unused).
         """
-        self.model = CausalLM.from_preset(self.preset_name, dtype=self._dtype)
-        self.backbone = self.model.backbone
+        model = CausalLM.from_preset(self.preset_name, dtype=self._dtype)
+        self.backbone = model.backbone
 
     def __call__(
         self,
