@@ -27,9 +27,10 @@ from tpu_inference.layers.vllm.backends.flash_attn import _jax_attn_func
 class KerasHubForCausalLM(nnx.Module):
     """Serves a KerasHub `CausalLM` on tpu-inference's native JAX path.
 
-    The loader routes any config carrying `keras_hub_preset` to this class.
-    It implements the model interface the native `flax_nnx` runner drives,
-    reusing the preset's existing backbone and weights. Keras's NNX mode
+    An adapter, not a conversion: it implements the model interface the
+    native `flax_nnx` runner drives (resolved by the `KerasHubForCausalLM`
+    architecture name through the standard model registry), reusing the
+    preset's existing backbone and weights. Keras's NNX mode
     (`KERAS_NNX_ENABLED=true`) makes the backbone's variables nnx state, so
     the runner's `nnx.split`/`nnx.merge` machinery carries the weights with
     no conversion:
